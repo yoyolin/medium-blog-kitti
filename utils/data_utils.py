@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from shutil import copy2
+from functools import wraps
 from typing import List, Dict
 from functools import partial
 import seaborn as sns
@@ -26,6 +27,17 @@ def save_jsonl(json_fname: str, annotation_list: List):
         converted_lines.append(converted_line)
     with open(json_fname, "w", encoding = "utf8") as f:
         f.write("\n".join(converted_lines))
+
+def report_error(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        print ("-----------------------------------------")
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as e:
+            print(f"Failed to test {fn.__name__}", e)
+        
+    return wrapper
 
 def get_percentage_df(series, total):
     return pd.concat(
@@ -309,3 +321,105 @@ class InputAnalyzerOD (InputAnalyzer):
         for i, fname in enumerate(fnames):
             print(i,)
             self.visualize_by_fname(fname)
+class InputValidator:
+    def __init__(self, task_type = ["OD", "MC", "ML", "SEG"],
+                       fnames_dict = {"train": "train.json",
+                                 "validation": "val.json"},
+                       image_dir = "./"):
+        
+        self.task_type = task_type
+        self.image_dir = image_dir
+        self.aggregate_dfs(fnames_dict)
+        
+    def aggregate_dfs(self, fnames_dict):
+        parser = JsonParser(self.task_type)
+        
+        dataframes = []
+        for train_type, fname in fnames_dict.items():
+            df_by_train_type = parser.parse(fname)
+            df_by_train_type["train_type"] = train_type
+            dataframes.append(df_by_train_type)
+        
+        self.df = pd.concat(dataframes, axis = 0)
+        display(self.df.head())
+
+        fnames_by_train_type = dict()
+        for train_type, subdf in self.df[["train_type", "fname"]].groupby("train_type"):
+            fnames_set = set(subdf["fname"].tolist())
+            fnames_by_train_type[train_type] = fnames_set
+        self.fnames_by_train_type = fnames_by_train_type
+        
+    def validate(self):
+        self.check_images_across_train_type()
+        self.check_missing_labels()
+        self.check_missing_images()
+        if self.task_type == "OD":
+            self.check_isCrowd_labels()
+            self.check_valid_bounding_boxes()
+    
+    @report_error
+    def check_missing_images(self):
+        images_missing = []
+        for fname in self.df["fname"].unique():
+            fname = os.path.join(self.image_dir, fname)
+            if not os.path.exists(fname):
+                images_missing.append(fname)
+        print(f"{len(images_missing)} images missing!")
+        print("\t".join(images_missing))
+
+    @report_error
+    def check_images_across_train_type(self):
+        overlaps = dict()
+        
+        train_fnames_set = self.fnames_by_train_type["train"]
+        for train_type, fnames_set in self.fnames_by_train_type.items():
+            if train_type == "train":
+                continue
+            overlaps[f"train & {train_type}"] = fnames_set & train_fnames_set
+        print("Check if any files in train also appears in validation or test")
+        print( overlaps)
+        
+    @report_error
+    def check_missing_labels(self):
+        no_label_fnames = self.df[self.df["label"].isna()]["fname"].unique()
+        print(f"Checked: {len(no_label_fnames)} images have no labels")
+        print(no_label_fnames)
+
+    @report_error
+    def check_isCrowd_labels(self):
+        isCrowd_labels = []
+        for label, subdf in self.df.groupby("label"):
+            if sum(subdf["isCrowd"]) == len(subdf):
+                isCrowd_labels.append(label)
+        print(f"{len(isCrowd_labels)} label only have isCrowd annotation,\
+                which will be totally ignored during evaluation", isCrowd_labels)
+        
+    @report_error
+    def check_valid_bounding_boxes(self):
+        bbox_df = self.df[["fname", "topX", "topY", "bottomX", "bottomY"]].set_index("fname")
+        bbox_df["MissingCoordinates"] = bbox_df.isna().sum(axis = 1)
+        bbox_df = bbox_df[bbox_df["MissingCoordinates"] != 0]
+        print(f"Bbox check 1: {len(bbox_df)} bounding boxes have missing coordinates value")
+        if len(bbox_df):
+            display(bbox_df)
+            return
+        
+        def valid_bbox(row):
+            if not (0 <= row["topX"] < row["bottomX"] < row["width"]):
+                return False
+            if not (0 <= row["topY"] < row["bottomY"] < row["height"]):
+                return False
+            return True
+        self.df["valid_bbox"] = self.df.apply(valid_bbox, axis = 1)
+        invalid_bbox_df = self.df[self.df["valid_bbox"] == False]
+        print(f"Bbox check 2: {len(invalid_bbox_df)} bounding boxes not following 0 <= top < bottom < width/height")
+        if len(invalid_bbox_df):
+            display(invalid_bbox_df)
+        
+        print("Bbox check 3: display 50 smallest bounding boxes")
+        def small_side(row):
+            return min(row["bottomY"] - row["topY"],
+                       row["bottomX"] - row["topX"])
+        self.df["smallest_side"] = self.df.apply(small_side, axis = 1)
+        self.df = self.df[["smallest_side", "label", "topX", "topY", "bottomX", "bottomY","fname"]].sort_values(by = "smallest_side")
+        display(self.df.head(50))
