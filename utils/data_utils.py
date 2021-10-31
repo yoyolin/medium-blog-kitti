@@ -107,7 +107,6 @@ class JsonParser:
         return df
 
 class InputVisualizerOD:
-
     def __init__(self, labels = None):
         self.font = ImageFont.truetype("./arial.ttf", size = 20)
         
@@ -119,7 +118,7 @@ class InputVisualizerOD:
         if label in self.label_to_color:
             return self.label_to_color[label]
         else:
-            color = np.random.choice(range(256), size=3)
+            color = tuple(np.random.choice(range(256), size=3))
             self.label_to_color[label] = color
             return color
     
@@ -132,23 +131,41 @@ class InputVisualizerOD:
             self.label_to_color[label] = tuple([int(c* 255) for c in color])
     
     def visualize(self, image_fname, image_df):
-        image = Image.open(image_fname)
-        draw = ImageDraw.Draw(image)
+        if "Probability" in image_df.columns:
+            image_df["isGT"] = image_df["Probability"].isna()
+        else:
+            image_df["isGT"] = True
+        
+        for isGT, image_df_sub in image_df.groupby("isGT"):
+            image = Image.open(image_fname)
+            draw = ImageDraw.Draw(image)
+            
+            GT_text = "Groundtruth" if isGT else "Prediction"
+            draw.text((0, 0),
+                      GT_text,
+                      align = "left",
+                      font = self.font,
+                      fill = "black")
+            
+            for _, bbox in image_df_sub.iterrows():
+                label = bbox["label"]
+                color = self.get_color(label)
 
-        for _, bbox in image_df.iterrows():
-            color = self.get_color(bbox["label"])
-            draw.rectangle((bbox["topX"], 
-                            bbox["topY"], 
-                            bbox["bottomX"], 
-                            bbox["bottomY"]), 
-                            outline = color, 
-                            width = 5)
-            draw.text((bbox["topX"], bbox["topY"] - 20),
-                       bbox["label"], 
-                       align ="left",
-                       font = self.font,
-                       fill = color)
-        display(image)
+                if not isGT:
+                    label = f'{label}:{bbox["Probability"]:.2f}'
+
+                draw.rectangle((bbox["topX"], 
+                                bbox["topY"], 
+                                bbox["bottomX"], 
+                                bbox["bottomY"]), 
+                                outline = color, 
+                                width = 5)
+                draw.text((bbox["topX"], bbox["topY"] - 20),
+                           label,
+                           align ="left",
+                           font = self.font,
+                           fill = color)
+            display(image)
 
 class InputAnalyzer:
     def __init__(self, task_type = ["OD", "MC", "ML", "SEG"]):
