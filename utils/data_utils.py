@@ -15,6 +15,9 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 from IPython.display import display, clear_output
 
+import warnings
+warnings.filterwarnings('ignore')
+
 def load_jsonl(json_fname: str) -> List[Dict]:
     lines = open(json_fname, encoding = "utf8").readlines()
     annotation_list = [json.loads(line) for line in lines]
@@ -107,13 +110,25 @@ class JsonParser:
         return df
 
 class InputVisualizerOD:
-    def __init__(self, labels = None):
+    def __init__(self, labels = None,
+                       label_column = "label",
+                       topX_column = "topX",
+                       topY_column = "topY",
+                       bottomX_column = "bottomX",
+                       bottomY_column = "bottomY",
+                       fname_column = "fname"):
         self.font = ImageFont.truetype("./arial.ttf", size = 20)
         
         self.label_to_color = dict()
         if labels is not None:
             self.get_distinct_colors(labels)
-            
+        self.label_column = label_column
+        self.topX_column = topX_column
+        self.topY_column = topY_column
+        self.bottomX_column = bottomX_column
+        self.bottomY_column = bottomY_column
+        self.fname_column = fname_column
+        
     def get_color(self, label):
         if label in self.label_to_color:
             return self.label_to_color[label]
@@ -130,43 +145,40 @@ class InputVisualizerOD:
         for label, color in zip(labels, colors):
             self.label_to_color[label] = tuple([int(c* 255) for c in color])
     
-    def visualize(self, image_fname, image_df):
-        if "Probability" in image_df.columns:
-            image_df["isGT"] = image_df["Probability"].isna()
-        else:
-            image_df["isGT"] = True
+    def visualize(self, image_fname, image_df, image_dir = "./"):        
+        image = Image.open(os.path.join(image_dir, image_fname))
+        draw = ImageDraw.Draw(image)
+
+        if self.fname_column in image_df.columns:
+            image_df = image_df[image_df[self.fname_column] == image_fname]
         
-        for isGT, image_df_sub in image_df.groupby("isGT"):
-            image = Image.open(image_fname)
-            draw = ImageDraw.Draw(image)
+        for _, bbox in image_df.iterrows():
+            label = bbox[self.label_column]
+            color = self.get_color(label)
+
+            draw.rectangle((bbox[self.topX_column], 
+                            bbox[self.topY_column], 
+                            bbox[self.bottomX_column], 
+                            bbox[self.bottomY_column]), 
+                            outline = color, 
+                            width = 2)
+            draw.text((bbox[self.topX_column], bbox[self.topY_column] - 20),
+                       label,
+                       align ="left",
+                       font = self.font,
+                       fill = color)
+        display(image)
+    
+    def random_visualize(self, image_df, k = 3, image_dir = "./", condition = dict()):
+        sub_df = image_df.sort_values(self.fname_column).copy()
+        for key, val in condition.items():
+            sub_df = sub_df[sub_df[key] == val]
+        
+        fnames = random.choices(sub_df["fname"].unique(), k = k)
+        for i, fname in enumerate(fnames):
+            print(i, fname)
+            self.visualize(fname, sub_df, image_dir)
             
-            GT_text = "Groundtruth" if isGT else "Prediction"
-            draw.text((0, 0),
-                      GT_text,
-                      align = "left",
-                      font = self.font,
-                      fill = "black")
-            
-            for _, bbox in image_df_sub.iterrows():
-                label = bbox["label"]
-                color = self.get_color(label)
-
-                if not isGT:
-                    label = f'{label}:{bbox["Probability"]:.2f}'
-
-                draw.rectangle((bbox["topX"], 
-                                bbox["topY"], 
-                                bbox["bottomX"], 
-                                bbox["bottomY"]), 
-                                outline = color, 
-                                width = 5)
-                draw.text((bbox["topX"], bbox["topY"] - 20),
-                           label,
-                           align ="left",
-                           font = self.font,
-                           fill = color)
-            display(image)
-
 class InputAnalyzer:
     def __init__(self, task_type = ["OD", "MC", "ML", "SEG"]):
         self.json_parser = JsonParser(task_type)
@@ -240,8 +252,6 @@ class InputAnalyzer:
 class InputAnalyzerOD (InputAnalyzer):
     def __init__(self):
         super().__init__(task_type = "OD")
-        self.visualizer = InputVisualizerOD()
-        random.seed(100)
         
     def aggregate_dfs(self):
         super().aggregate_image_dfs()
@@ -250,9 +260,6 @@ class InputAnalyzerOD (InputAnalyzer):
         self.bbox_df = pd.concat(self.dataframes, axis = 0)
         print("bbox_df",)
         display(self.bbox_df.head())
-        
-        # setups for visualizer
-        self.visualizer.get_distinct_colors(self.bbox_df["label"].unique())
         
         # setups for size column
         def get_size(row):
@@ -300,13 +307,19 @@ class InputAnalyzerOD (InputAnalyzer):
                      fillna(0))
        
         print("Analyzing size per label")
-        display(self.bbox_df.pivot_table(
-                                         index = "label", 
-                                         columns = "bbox_size", 
-                                         values = "fname", 
-                                         aggfunc = "count").\
-                             fillna(0))
-    def bbox_dimension_plot(): 
+        bbox_size_df = self.bbox_df.pivot_table(
+                         index = "label", 
+                         columns = "bbox_size", 
+                         values = "fname", 
+                         aggfunc = "count",
+                        margins = True).\
+                     fillna(0)
+        bbox_size_df = bbox_size_df.div(bbox_size_df["All"], axis = 0).\
+                            drop("All", axis = 1).\
+                            apply(lambda series: series.apply(
+                                  lambda value: format(value,'.2%')))
+        display(bbox_size_df)
+    def bbox_dimension_plot(self): 
         print("Creating bounding box dimension plot")
         g = sns.FacetGrid(self.bbox_df, 
                           col="label", col_wrap = 3,
@@ -325,28 +338,15 @@ class InputAnalyzerOD (InputAnalyzer):
                     total = len(self.bbox_df)
                 )) 
     
-    def visualize_by_fname(self, fname):
-        print(fname)
-        self.visualizer.visualize(image_fname = fname,
-                                  image_df = self.bbox_df[self.bbox_df["fname"] == fname])
     
-    def random_visualize(self, k = 1, condition = dict()):
-        sub_df = self.bbox_df
-        for key, val in condition.items():
-            sub_df = sub_df[sub_df[key] == val]
-        fnames = random.choices(sub_df["fname"].unique(), k = k)
-        for i, fname in enumerate(fnames):
-            print(i,)
-            self.visualize_by_fname(fname)
 class InputValidator:
     def __init__(self, task_type = ["OD", "MC", "ML", "SEG"],
-                       fnames_dict = {"train": "train.json",
-                                 "validation": "val.json"},
+                       train_type_to_fname_dict = {"train": "train.json",
+                                                   "validation": "val.json"},
                        image_dir = "./"):
-        
         self.task_type = task_type
         self.image_dir = image_dir
-        self.aggregate_dfs(fnames_dict)
+        self.aggregate_dfs(train_type_to_fname_dict)
         
     def aggregate_dfs(self, fnames_dict):
         parser = JsonParser(self.task_type)
@@ -365,7 +365,8 @@ class InputValidator:
             fnames_set = set(subdf["fname"].tolist())
             fnames_by_train_type[train_type] = fnames_set
         self.fnames_by_train_type = fnames_by_train_type
-        
+
+    
     def validate(self):
         self.check_images_across_train_type()
         self.check_missing_labels()
@@ -413,7 +414,7 @@ class InputValidator:
         
     @report_error
     def check_valid_bounding_boxes(self):
-        bbox_df = self.df[["fname", "topX", "topY", "bottomX", "bottomY"]].set_index("fname")
+        bbox_df = self.df[["fname", "topX", "topY", "bottomX", "bottomY", "isCrowd"]].set_index("fname")
         bbox_df["MissingCoordinates"] = bbox_df.isna().sum(axis = 1)
         bbox_df = bbox_df[bbox_df["MissingCoordinates"] != 0]
         print(f"Bbox check 1: {len(bbox_df)} bounding boxes have missing coordinates value")
@@ -433,10 +434,10 @@ class InputValidator:
         if len(invalid_bbox_df):
             display(invalid_bbox_df)
         
-        print("Bbox check 3: display 50 smallest bounding boxes")
+        print("Bbox check 3: display 20 smallest bounding boxes")
         def small_side(row):
             return min(row["bottomY"] - row["topY"],
                        row["bottomX"] - row["topX"])
         self.df["smallest_side"] = self.df.apply(small_side, axis = 1)
-        self.df = self.df[["smallest_side", "label", "topX", "topY", "bottomX", "bottomY","fname"]].sort_values(by = "smallest_side")
-        display(self.df.head(50))
+        self.df = self.df[["smallest_side", "label", "isCrowd", "topX", "topY", "bottomX", "bottomY","fname"]].sort_values(by = "smallest_side")
+        display(self.df.head(20))
