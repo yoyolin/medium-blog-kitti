@@ -96,8 +96,8 @@ class Predictor:
             print("BUG", local_fname, e)
 
     def get_predictions(self,
-                        image_dir: str,
-                        fnames) -> dict:
+                        fnames: List[str],
+                        image_dir = "./") -> dict:
         df_data = []
         failed_fnames = []
         for fname in tqdm(fnames):
@@ -134,8 +134,11 @@ class Evaluator:
             self.setup_predictions(predictor, image_dir)
         
         self.setup_concat_df()
-        self.image_dir = "./"
+        self.image_dir = image_dir
+        self.iou = 0.5
+        self.threshold = 0.5
         self.visualizer = InputVisualizerOD(self.concat_df["label"].unique())
+        
 
     def setup_gts(self, jsonl):
         parser =  JsonParser("OD")
@@ -182,10 +185,18 @@ class Evaluator:
     def visualize_by_fname(self, fname):
         image_df = self.concat_df[self.concat_df["fname"] == fname]
         image_df = image_df[~(image_df["Probability"] < self.threshold)]
-        self.visualizer.visualize(image_fname = fname, image_df = image_df)
-
+        image_df["isGT"] = image_df["Probability"].isna()
+        for isGT, sub_df in image_df.groupby("isGT"):
+            if isGT:
+                self.visualizer.visualize(image_fname = fname, image_df = sub_df,
+                                          title = "Groundtruth")
+            else:
+                sub_df["label:prob"] = sub_df.apply(lambda row: f"{row['label']}:{row['Probability']:.2f}", axis = 1)
+                self.visualizer.visualize(image_fname = fname, image_df = sub_df,
+                                          title = "Prediction", text_column = "label:prob")
     def random_visualize(self, k = 1, from_worst_mAP = False):
         if from_worst_mAP:
+            self.get_mAP()
             subdf = self.image_df.head(k)
         else:
             subdf = self.image_df.sample(k, random_state = 42)

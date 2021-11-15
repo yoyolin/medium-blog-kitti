@@ -145,13 +145,17 @@ class InputVisualizerOD:
         for label, color in zip(labels, colors):
             self.label_to_color[label] = tuple([int(c* 255) for c in color])
     
-    def visualize(self, image_fname, image_df, image_dir = "./"):        
+    def visualize(self, image_fname, image_df, image_dir = "./", 
+                  title = None, text_column = None):        
         image = Image.open(os.path.join(image_dir, image_fname))
         draw = ImageDraw.Draw(image)
 
         if self.fname_column in image_df.columns:
             image_df = image_df[image_df[self.fname_column] == image_fname]
         
+        if title is not None and isinstance(title, str):
+            draw.text((0, 0), title, font = self.font, fill = "black")
+
         for _, bbox in image_df.iterrows():
             label = bbox[self.label_column]
             color = self.get_color(label)
@@ -162,8 +166,10 @@ class InputVisualizerOD:
                             bbox[self.bottomY_column]), 
                             outline = color, 
                             width = 2)
+            
+            text = label if text_column is None else bbox[text_column]
             draw.text((bbox[self.topX_column], bbox[self.topY_column] - 20),
-                       label,
+                       text,
                        align ="left",
                        font = self.font,
                        fill = color)
